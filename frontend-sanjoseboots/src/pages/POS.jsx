@@ -126,7 +126,11 @@ const POS = () => {
         }))
       };
 
-      await salesAPI.create(saleData);
+      console.log('📦 Enviando venta:', saleData);
+
+      const response = await salesAPI.create(saleData);
+
+      console.log('✅ Respuesta del servidor:', response.data);
 
       toast.success('Venta registrada correctamente');
 
@@ -137,14 +141,21 @@ const POS = () => {
         }
       }
 
+      // ✅ LIMPIAR CARRITO
       setCartItems([]);
       setIsPaymentModalOpen(false);
 
+      // ✅ NOTIFICAR A OTROS COMPONENTES QUE EL STOCK CAMBIÓ
+      console.log('📢 Emitiendo evento stockUpdated...');
+      window.dispatchEvent(new Event('stockUpdated'));
+
     } catch (error) {
-      console.error(error);
+      console.error('❌ Error en venta:', error);
 
       if (error.response) {
-        toast.error(error.response.data?.message || 'Error en la venta');
+        const errorMessage = error.response.data?.message || 'Error en la venta';
+        toast.error(errorMessage);
+        console.error('Detalles del error:', error.response.data);
       } else {
         toast.error('Error de conexión');
       }

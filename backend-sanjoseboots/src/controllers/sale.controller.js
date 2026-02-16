@@ -17,10 +17,36 @@ exports.createSale = async (req, res) => {
 
     const usuarioId = req.user.usuarioId;
 
-    // Convertir detalles a JSON
-    const detallesJSON = JSON.stringify(detalles);
+    console.log('📦 Registrando venta:', {
+      numeroTicket,
+      usuarioId,
+      total,
+      metodoPago,
+      cantidadProductos: detalles.length
+    });
 
-    // Ejecutar procedimiento SIN parámetro OUT
+    // Validar que vengan detalles
+    if (!detalles || detalles.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No se proporcionaron productos para la venta'
+      });
+    }
+
+    // ✅ TRANSFORMAR campos de minúscula a PascalCase
+    const detallesTransformados = detalles.map(detalle => ({
+      VarianteID: detalle.varianteId || detalle.VarianteID,
+      Cantidad: detalle.cantidad || detalle.Cantidad,
+      PrecioUnitario: detalle.precioUnitario || detalle.PrecioUnitario,
+      Descuento: detalle.descuento || detalle.Descuento || 0
+    }));
+
+    console.log('🔄 Detalles transformados:', JSON.stringify(detallesTransformados));
+
+    // Convertir detalles a JSON
+    const detallesJSON = JSON.stringify(detallesTransformados);
+
+    // Ejecutar procedimiento
     const result = await executeProcedure('sp_RegistrarVenta', [
       numeroTicket,
       usuarioId,
@@ -33,24 +59,73 @@ exports.createSale = async (req, res) => {
       detallesJSON
     ]);
 
-    // El procedimiento retorna VentaID y NumeroTicket en el SELECT final
-    const ventaData = result[0];
+    console.log('✅ Resultado procedimiento completo:', JSON.stringify(result, null, 2));
+
+    // ✅ CORRECCIÓN: El procedimiento puede retornar en diferentes formatos
+    // Necesitamos manejar: result[0][0] o result[0] dependiendo de cómo venga
     
+    let ventaData;
+    
+    if (Array.isArray(result) && result.length > 0) {
+      // Si result[0] es un array, tomar el primer elemento
+      if (Array.isArray(result[0]) && result[0].length > 0) {
+        ventaData = result[0][0];
+      } 
+      // Si result[0] es un objeto directamente
+      else if (typeof result[0] === 'object') {
+        ventaData = result[0];
+      }
+    }
+
+    console.log('📦 Datos de venta extraídos:', ventaData);
+    
+    // Verificar si hubo error
+    if (!ventaData) {
+      console.error('❌ No se pudo extraer datos de venta del resultado');
+      return res.status(500).json({
+        success: false,
+        message: 'Error al procesar respuesta del servidor'
+      });
+    }
+
+    if (ventaData.Estado === 'ERROR' || ventaData.VentaID === 0) {
+      console.error('❌ Error reportado por procedimiento:', ventaData.Mensaje);
+      
+      // Verificar si es error de stock
+      if (ventaData.Mensaje && ventaData.Mensaje.includes('Stock insuficiente')) {
+        return res.status(400).json({
+          success: false,
+          message: ventaData.Mensaje
+        });
+      }
+      
+      return res.status(500).json({
+        success: false,
+        message: ventaData.Mensaje || 'Error al registrar venta'
+      });
+    }
+
+    console.log('✅ Venta registrada exitosamente:', {
+      ventaId: ventaData.VentaID,
+      numeroTicket: ventaData.NumeroTicket
+    });
+
     res.status(201).json({
       success: true,
-      message: 'Venta registrada exitosamente',
+      message: ventaData.Mensaje || 'Venta registrada exitosamente',
       data: {
         ventaId: ventaData.VentaID,
         numeroTicket: ventaData.NumeroTicket
       }
     });
   } catch (error) {
-    console.error('Error creando venta:', error);
+    console.error('❌ Error creando venta:', error);
     
-    if (error.message.includes('Stock insuficiente')) {
+    // Manejar errores específicos de stock
+    if (error.message && error.message.includes('Stock insuficiente')) {
       return res.status(400).json({
         success: false,
-        message: 'Stock insuficiente para completar la venta'
+        message: error.message
       });
     }
 
@@ -67,11 +142,32 @@ exports.getSaleById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const [venta, detalles] = await executeProcedure('sp_ObtenerDetalleVenta', [
-      parseInt(id)
-    ]);
+    const queryVenta = `
+      SELECT 
+        v.*,
+        u.NombreCompleto as NombreUsuario
+      FROM ventas v
+      LEFT JOIN usuarios u ON v.UsuarioID = u.UsuarioID
+      WHERE v.VentaID = ?
+    `;
 
-    if (!venta || venta.length === 0) {
+    const queryDetalles = `
+      SELECT 
+        dv.*,
+        p.NombreProducto,
+        pv.Color,
+        pv.Talla,
+        pv.CodigoVariante
+      FROM detalleventas dv
+      INNER JOIN productovariantes pv ON dv.VarianteID = pv.VarianteID
+      INNER JOIN productos p ON pv.ProductoID = p.ProductoID
+      WHERE dv.VentaID = ?
+    `;
+
+    const [venta] = await executeQuery(queryVenta, [id]);
+    const detalles = await executeQuery(queryDetalles, [id]);
+
+    if (!venta) {
       return res.status(404).json({
         success: false,
         message: 'Venta no encontrada'
@@ -81,7 +177,7 @@ exports.getSaleById = async (req, res) => {
     res.json({
       success: true,
       data: {
-        venta: venta[0],
+        ...venta,
         detalles: detalles || []
       }
     });
@@ -107,16 +203,42 @@ exports.getSalesByPeriod = async (req, res) => {
       });
     }
 
-    const ventas = await executeProcedure('sp_ObtenerVentasPorPeriodo', [
-      fechaInicio,
-      fechaFin,
-      usuarioId || null,
-      estado || null
-    ]);
+    let query = `
+      SELECT 
+        v.VentaID,
+        v.NumeroTicket,
+        v.FechaVenta,
+        v.Subtotal,
+        v.Descuento,
+        v.IVA,
+        v.Total,
+        v.MetodoPago,
+        v.Estado,
+        u.NombreCompleto as NombreUsuario
+      FROM ventas v
+      LEFT JOIN usuarios u ON v.UsuarioID = u.UsuarioID
+      WHERE DATE(v.FechaVenta) BETWEEN ? AND ?
+    `;
+
+    const params = [fechaInicio, fechaFin];
+
+    if (usuarioId) {
+      query += ' AND v.UsuarioID = ?';
+      params.push(usuarioId);
+    }
+
+    if (estado) {
+      query += ' AND v.Estado = ?';
+      params.push(estado);
+    }
+
+    query += ' ORDER BY v.FechaVenta DESC';
+
+    const ventas = await executeQuery(query, params);
 
     res.json({
       success: true,
-      data: ventas
+      data: ventas || []
     });
   } catch (error) {
     console.error('Error obteniendo ventas:', error);
@@ -142,27 +264,39 @@ exports.cancelSale = async (req, res) => {
       });
     }
 
-    const result = await executeProcedure('sp_CancelarVenta', [
-      parseInt(id),
-      usuarioId,
-      motivo
-    ]);
+    const [venta] = await executeQuery(
+      'SELECT * FROM ventas WHERE VentaID = ?',
+      [id]
+    );
 
-    res.json({
-      success: true,
-      message: 'Venta cancelada exitosamente',
-      data: result[0]
-    });
-  } catch (error) {
-    console.error('Error cancelando venta:', error);
-    
-    if (error.message.includes('ya está cancelada')) {
+    if (!venta) {
+      return res.status(404).json({
+        success: false,
+        message: 'Venta no encontrada'
+      });
+    }
+
+    if (venta.Estado === 'CANCELADA') {
       return res.status(400).json({
         success: false,
         message: 'La venta ya está cancelada'
       });
     }
 
+    await executeQuery(
+      `UPDATE ventas 
+       SET Estado = 'CANCELADA', 
+           Observaciones = CONCAT(IFNULL(Observaciones, ''), ' | CANCELADA: ', ?)
+       WHERE VentaID = ?`,
+      [motivo, id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Venta cancelada exitosamente'
+    });
+  } catch (error) {
+    console.error('Error cancelando venta:', error);
     res.status(500).json({
       success: false,
       message: 'Error al cancelar venta',
@@ -183,15 +317,46 @@ exports.getDailySummary = async (req, res) => {
       });
     }
 
-    const [resumenGeneral, ventasPorHora, topVendedores] = await executeProcedure(
-      'sp_ResumenVentasDia',
+    const [resumen] = await executeQuery(
+      `SELECT 
+        COUNT(*) as TotalVentas,
+        COALESCE(SUM(Total), 0) as TotalIngresos,
+        COALESCE(AVG(Total), 0) as TicketPromedio
+       FROM ventas
+       WHERE DATE(FechaVenta) = ? AND Estado = 'COMPLETADA'`,
+      [fecha]
+    );
+
+    const ventasPorHora = await executeQuery(
+      `SELECT 
+        HOUR(FechaVenta) as Hora,
+        COUNT(*) as CantidadVentas,
+        SUM(Total) as TotalVentas
+       FROM ventas
+       WHERE DATE(FechaVenta) = ? AND Estado = 'COMPLETADA'
+       GROUP BY HOUR(FechaVenta)
+       ORDER BY Hora`,
+      [fecha]
+    );
+
+    const topVendedores = await executeQuery(
+      `SELECT 
+        u.NombreCompleto,
+        COUNT(*) as CantidadVentas,
+        SUM(v.Total) as TotalVendido
+       FROM ventas v
+       LEFT JOIN usuarios u ON v.UsuarioID = u.UsuarioID
+       WHERE DATE(v.FechaVenta) = ? AND v.Estado = 'COMPLETADA'
+       GROUP BY v.UsuarioID
+       ORDER BY TotalVendido DESC
+       LIMIT 5`,
       [fecha]
     );
 
     res.json({
       success: true,
       data: {
-        resumenGeneral: resumenGeneral[0],
+        resumenGeneral: resumen || {},
         ventasPorHora: ventasPorHora || [],
         topVendedores: topVendedores || []
       }

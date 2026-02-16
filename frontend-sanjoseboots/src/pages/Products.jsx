@@ -16,14 +16,28 @@ const Products = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterActive, setFilterActive] = useState('all'); // 'all', 'active', 'inactive'
   
-  // Estados para modales - CORREGIDO
+  // Estados para modales
   const [isProductModalOpen, setIsProductModalOpen] = useState(false);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
-  const [selectedProduct, setSelectedProduct] = useState(null); // Producto completo, no solo ID
+  const [selectedProduct, setSelectedProduct] = useState(null);
   const [productToDelete, setProductToDelete] = useState(null);
 
   useEffect(() => {
     fetchProducts();
+    
+    // ✅ ESCUCHAR EVENTO DE ACTUALIZACIÓN DE STOCK
+    const handleStockUpdate = () => {
+      console.log('📦 Stock actualizado desde POS, recargando productos...');
+      fetchProducts();
+      toast.success('Stock actualizado', { duration: 2000 });
+    };
+    
+    window.addEventListener('stockUpdated', handleStockUpdate);
+    
+    // Cleanup
+    return () => {
+      window.removeEventListener('stockUpdated', handleStockUpdate);
+    };
   }, []);
 
   const fetchProducts = async () => {
@@ -73,17 +87,17 @@ const Products = () => {
     return matchSearch && matchFilter;
   });
 
-  // CORREGIDO: Abrir modal para crear nuevo producto
+  // Abrir modal para crear nuevo producto
   const handleNuevoProducto = () => {
     console.log('➕ Abriendo modal para CREAR producto');
-    setSelectedProduct(null); // null = modo crear
+    setSelectedProduct(null);
     setIsProductModalOpen(true);
   };
 
-  // CORREGIDO: Abrir modal para editar producto
+  // Abrir modal para editar producto
   const handleEditarProducto = (product) => {
     console.log('✏️ Abriendo modal para EDITAR producto:', product);
-    setSelectedProduct(product); // Pasar el producto COMPLETO
+    setSelectedProduct(product);
     setIsProductModalOpen(true);
   };
 
@@ -300,7 +314,7 @@ const Products = () => {
                     </div>
                   </div>
 
-                  {/* Botones de Acción - CORREGIDO */}
+                  {/* Botones de Acción */}
                   <div className="flex gap-2 pt-3 border-t border-gray-200">
                     <Button
                       variant="outline"
@@ -354,7 +368,7 @@ const Products = () => {
         )}
       </div>
 
-      {/* Modal de Producto - CORREGIDO */}
+      {/* Modal de Producto */}
       <ProductModal
         isOpen={isProductModalOpen}
         onClose={handleModalClose}
