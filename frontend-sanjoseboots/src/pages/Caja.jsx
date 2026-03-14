@@ -1,555 +1,552 @@
-// frontend/src/pages/Caja.jsx
-import { useState, useEffect, useCallback } from 'react';
-import {
-  DollarSign, CreditCard, Smartphone, TrendingUp,
-  CheckCircle, AlertTriangle, XCircle, Clock,
-  RefreshCw, ChevronDown, ChevronUp, FileText, X
-} from 'lucide-react';
+// src/pages/Caja.jsx — VERSIÓN COMPLETA FASE 6
+// Cambios vs anterior:
+//  - Autorefresh al abrir caja (sin recargar página)
+//  - "Monto Inicial" → "Fondo Inicial", "Ventas Efectivo" → "Efectivo"
+//  - Botón "Movimiento" (entrada/salida/devolución/ajuste)
+//  - Botón "Corte" (resumen sin cerrar, imprimible/PDF)
+//  - Historial de cortes con botón exportar PDF y Excel
+
+import { useEffect, useState, useCallback } from 'react';
 import Layout from '../components/layout/Layout';
+import {
+  Lock, Unlock, RefreshCw, DollarSign, CreditCard,
+  ArrowRightLeft, TrendingUp, Plus, FileText,
+  ChevronDown, ChevronUp, Calendar, Printer, Sheet,
+} from 'lucide-react';
 import toast from 'react-hot-toast';
-import api from '../api/axios';
+import useCajaStore    from '../store/cajaStore';
+import useAuthStore    from '../store/authStore';
+import { cajaAPI }     from '../api/endpoints';
+import { formatCurrency } from '../utils/formatters';
+import AperturaCajaModal  from '../components/caja/AperturaCajaModal';
+import CierreCajaModal    from '../components/caja/CierreCajaModal';
+import MovimientoCajaModal from '../components/caja/MovimientoCajaModal';
+import CorteModal          from '../components/caja/CorteModal';
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-const fmt = (v) =>
-  new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(v || 0);
-
-const fmtDateTime = (d) =>
-  d ? new Date(d).toLocaleString('es-MX', {
+function fmtDate(d) {
+  if (!d) return '—';
+  return new Date(d).toLocaleString('es-MX', {
     day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit'
-  }) : '—';
+  });
+}
+function timeSince(d) {
+  const diff = Math.floor((Date.now() - new Date(d)) / 60000);
+  if (diff < 1)  return 'Recién abierta';
+  if (diff < 60) return `${diff} min`;
+  const h = Math.floor(diff / 60), m = diff % 60;
+  return `${h}h ${m}m`;
+}
 
-const today = () => new Date().toISOString().split('T')[0];
-const daysAgo = (n) => {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().split('T')[0];
-};
+export default function CajaPage() {
+  const { cajaActual, setCajaActual, clearCaja } = useCajaStore();
+  const { user } = useAuthStore();
 
-// ─── Modal base ───────────────────────────────────────────────────────────────
-const Modal = ({ open, onClose, title, children, width = 'max-w-lg' }) => {
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
-      <div className={`relative bg-white rounded-2xl shadow-2xl w-full ${width} max-h-[90vh] overflow-y-auto`}>
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-gray-800">{title}</h2>
-          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors">
-            <X className="w-5 h-5 text-gray-500" />
-          </button>
-        </div>
-        <div className="px-6 py-5">{children}</div>
-      </div>
-    </div>
+  const [ventas,           setVentas]           = useState([]);
+  const [historial,        setHistorial]         = useState([]);
+  const [historialOpen,    setHistorialOpen]     = useState(false);
+  const [historialFechaDesde, setHistorialFechaDesde] = useState(
+    new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0,10)
   );
-};
-
-// ─── Badge estado corte ───────────────────────────────────────────────────────
-const EstadoBadge = ({ estado }) => {
-  const map = {
-    CUADRADO: { cls: 'bg-green-100 text-green-700', icon: CheckCircle,    label: 'Cuadrado'  },
-    SOBRANTE: { cls: 'bg-blue-100 text-blue-700',   icon: TrendingUp,     label: 'Sobrante'  },
-    FALTANTE: { cls: 'bg-red-100 text-red-600',     icon: AlertTriangle,  label: 'Faltante'  },
-  };
-  const cfg = map[estado] || { cls: 'bg-gray-100 text-gray-600', icon: Clock, label: estado };
-  const Icon = cfg.icon;
-  return (
-    <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium ${cfg.cls}`}>
-      <Icon className="w-3 h-3" />
-      {cfg.label}
-    </span>
+  const [historialFechaHasta, setHistorialFechaHasta] = useState(
+    new Date().toISOString().slice(0,10)
   );
-};
+  const [loadingVentas,    setLoadingVentas]     = useState(false);
+  const [loadingHistorial, setLoadingHistorial]  = useState(false);
+  const [ticker,           setTicker]            = useState(0);  // fuerza re-render de tiempo
+  const [showMovimiento,   setShowMovimiento]    = useState(false);
+  const [showCorte,        setShowCorte]         = useState(false);
+  const [showCierre,       setShowCierre]        = useState(false);
+  const [showApertura,     setShowApertura]      = useState(false);
 
-// ─── Modal abrir caja ─────────────────────────────────────────────────────────
-const ModalAbrirCaja = ({ open, onClose, onSuccess }) => {
-  const [montoInicial, setMontoInicial] = useState('');
-  const [observaciones, setObservaciones] = useState('');
-  const [loading, setLoading] = useState(false);
-
+  // Actualizar tiempo transcurrido cada minuto
   useEffect(() => {
-    if (open) { setMontoInicial(''); setObservaciones(''); }
-  }, [open]);
-
-  const handleSubmit = async () => {
-    const monto = parseFloat(montoInicial) || 0;
-    if (monto < 0) return toast.error('El monto no puede ser negativo');
-
-    setLoading(true);
-    try {
-      await api.post('/caja/abrir', {
-        MontoInicial: monto,
-        Observaciones: observaciones || null,
-      });
-      toast.success('¡Caja abierta exitosamente!');
-      onSuccess();
-      onClose();
-    } catch (err) {
-      toast.error(err.response?.data?.message || 'Error al abrir caja');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const inputCls = 'w-full h-11 px-3 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white';
-  const labelCls = 'block text-xs font-medium text-gray-600 mb-1.5';
-
-  return (
-    <Modal open={open} onClose={onClose} title="Abrir Caja">
-      <div className="space-y-4">
-        <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl">
-          <p className="text-sm text-amber-800">
-            Ingresa el monto de efectivo con el que inicias el día. Este monto se usará para calcular el cuadre al cierre.
-          </p>
-        </div>
-        <div>
-          <label className={labelCls}>Monto inicial en caja ($)</label>
-          <div className="relative">
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">$</span>
-            <input
-              className={`${inputCls} pl-7`}
-              type="number"
-              min="0"
-              step="0.01"
-              value={montoInicial}
-              onChange={e => setMontoInicial(e.target.value)}
-              placeholder="0.00"
-              autoFocus
-            />
-          </div>
-        </div>
-        <div>
-          <label className={labelCls}>Observaciones (opcional)</label>
-          <textarea
-            className="w-full px-3 py-2.5 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white resize-none"
-            rows={2}
-            value={observaciones}
-            onChange={e => setObservaciones(e.target.value)}
-            placeholder="Notas sobre la apertura..."
-          />
-        </div>
-        <div className="flex gap-3 pt-1">
-          <button onClick={onClose}
-            className="flex-1 h-11 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors">
-            Cancelar
-          </button>
-          <button onClick={handleSubmit} disabled={loading}
-            className="flex-1 h-11 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-60 flex items-center justify-center gap-2">
-            {loading && <RefreshCw className="w-4 h-4 animate-spin" />}
-            Abrir Caja
-          </button>
-        </div>
-      </div>
-    </Modal>
-  );
-};
-
-// ─── Modal realizar corte ─────────────────────────────────────────────────────
-const ModalCorte = ({ open, onClose, apertura, ventas, onSuccess }) => {
-  const [efectivoContado, setEfectivoContado] = useState('');
-  const [observaciones, setObservaciones]     = useState('');
-  const [loading, setLoading]                 = useState(false);
-  const [preview, setPreview]                 = useState(null);
-
-  useEffect(() => {
-    if (open) { setEfectivoContado(''); setObservaciones(''); setPreview(null); }
-  }, [open]);
-
-  // Calcular preview en tiempo real
-  useEffect(() => {
-    const contado  = parseFloat(efectivoContado) || 0;
-    const montoIni = parseFloat(apertura?.MontoInicial) || 0;
-    const efVentas = parseFloat(ventas?.VentasEfectivo) || 0;
-    const esperado = montoIni + efVentas;
-    const diff     = contado - esperado;
-    setPreview({
-      esperado,
-      contado,
-      diferencia: diff,
-      estado: Math.abs(diff) < 0.01 ? 'CUADRADO' : diff > 0 ? 'SOBRANTE' : 'FALTANTE',
-    });
-  }, [efectivoContado, apertura, ventas]);
-
-  const handleSubmit = async () => {
-    const contado = parseFloat(efectivoContado);
-    if (isNaN(contado) || contado < 0) return toast.error('Ingresa un monto válido');
-
-    setLoading(true);
-    try {
-      await api.post('/caja/corte', {
-        AperturaID: apertura.AperturaID,
-        EfectivoContado: contado,
-        Observaciones: observaciones || null,
-      });
-      toast.success('Corte realizado exitosamente');
-      onSuccess();
-      onClose();
-    } catch (err) {
-      toast.error(err.response?.data?.message || 'Error al realizar corte');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const inputCls = 'w-full h-11 px-3 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white';
-  const labelCls = 'block text-xs font-medium text-gray-600 mb-1.5';
-
-  const diffColor = !preview ? '' :
-    preview.estado === 'CUADRADO' ? 'text-green-600' :
-    preview.estado === 'SOBRANTE' ? 'text-blue-600' : 'text-red-600';
-
-  return (
-    <Modal open={open} onClose={onClose} title="Realizar Corte de Caja" width="max-w-xl">
-      <div className="space-y-4">
-        {/* Resumen del día */}
-        <div className="bg-gray-50 rounded-xl p-4 space-y-2">
-          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Resumen del día</p>
-          <div className="grid grid-cols-2 gap-3">
-            {[
-              { label: 'Monto inicial',   value: fmt(parseFloat(apertura?.MontoInicial) || 0) },
-              { label: 'Ventas Efectivo', value: fmt(ventas?.VentasEfectivo) },
-              { label: 'Ventas Tarjeta',  value: fmt(ventas?.VentasTarjeta) },
-              { label: 'Transferencias',  value: fmt(ventas?.VentasTransferencia) },
-            ].map((r, i) => (
-              <div key={i} className="flex justify-between items-center py-1.5 border-b border-gray-200 last:border-0">
-                <span className="text-xs text-gray-500">{r.label}</span>
-                <span className="text-sm font-semibold text-gray-700">{r.value}</span>
-              </div>
-            ))}
-          </div>
-          <div className="flex justify-between items-center pt-2 mt-1 border-t border-gray-300">
-            <span className="text-xs font-semibold text-gray-600">Total Ventas</span>
-            <span className="text-base font-bold text-amber-700">{fmt(ventas?.TotalVentas)}</span>
-          </div>
-        </div>
-
-        {/* Efectivo contado */}
-        <div>
-          <label className={labelCls}>Efectivo contado en caja *</label>
-          <div className="relative">
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">$</span>
-            <input
-              className={`${inputCls} pl-7`}
-              type="number" min="0" step="0.01"
-              value={efectivoContado}
-              onChange={e => setEfectivoContado(e.target.value)}
-              placeholder="0.00"
-              autoFocus
-            />
-          </div>
-        </div>
-
-        {/* Preview cuadre */}
-        {preview && efectivoContado !== '' && (
-          <div className={`p-4 rounded-xl border-2 ${
-            preview.estado === 'CUADRADO' ? 'bg-green-50 border-green-200' :
-            preview.estado === 'SOBRANTE' ? 'bg-blue-50 border-blue-200' :
-            'bg-red-50 border-red-200'
-          }`}>
-            <div className="flex justify-between items-center mb-2">
-              <span className="text-sm font-semibold text-gray-700">Resultado del corte</span>
-              <EstadoBadge estado={preview.estado} />
-            </div>
-            <div className="space-y-1 text-sm">
-              <div className="flex justify-between">
-                <span className="text-gray-500">Efectivo esperado</span>
-                <span className="font-medium">{fmt(preview.esperado)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Efectivo contado</span>
-                <span className="font-medium">{fmt(preview.contado)}</span>
-              </div>
-              <div className="flex justify-between border-t border-gray-200 pt-1 mt-1">
-                <span className="font-semibold text-gray-600">Diferencia</span>
-                <span className={`font-bold text-base ${diffColor}`}>
-                  {preview.diferencia >= 0 ? '+' : ''}{fmt(preview.diferencia)}
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        <div>
-          <label className={labelCls}>Observaciones (opcional)</label>
-          <textarea
-            className="w-full px-3 py-2.5 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white resize-none"
-            rows={2}
-            value={observaciones}
-            onChange={e => setObservaciones(e.target.value)}
-            placeholder="Notas sobre el corte..."
-          />
-        </div>
-
-        <div className="flex gap-3 pt-1">
-          <button onClick={onClose}
-            className="flex-1 h-11 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors">
-            Cancelar
-          </button>
-          <button onClick={handleSubmit} disabled={loading || !efectivoContado}
-            className="flex-1 h-11 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-60 flex items-center justify-center gap-2">
-            {loading && <RefreshCw className="w-4 h-4 animate-spin" />}
-            Confirmar Corte
-          </button>
-        </div>
-      </div>
-    </Modal>
-  );
-};
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// PÁGINA PRINCIPAL
-// ═══════════════════════════════════════════════════════════════════════════════
-const CajaPage = () => {
-  const [cajaData, setCajaData]       = useState(null);
-  const [loading, setLoading]         = useState(true);
-  const [historial, setHistorial]     = useState([]);
-  const [loadingHist, setLoadingHist] = useState(false);
-  const [showHistorial, setShowHistorial] = useState(false);
-  const [fechaInicio, setFechaInicio] = useState(daysAgo(30));
-  const [fechaFin, setFechaFin]       = useState(today());
-
-  const [modalAbrir, setModalAbrir]   = useState(false);
-  const [modalCorte, setModalCorte]   = useState(false);
-
-  const fetchCaja = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await api.get('/caja/actual');
-      setCajaData(res.data.data);
-    } catch (err) {
-      toast.error('Error al cargar estado de caja');
-    } finally {
-      setLoading(false);
-    }
+    const id = setInterval(() => setTicker(t => t + 1), 60000);
+    return () => clearInterval(id);
   }, []);
 
-  const fetchHistorial = useCallback(async () => {
-    setLoadingHist(true);
+  // Cargar caja actual al montar
+  const fetchCajaActual = useCallback(async () => {
     try {
-      const res = await api.get(`/caja/historial?fechaInicio=${fechaInicio}&fechaFin=${fechaFin}`);
-      setHistorial(res.data.data || []);
-    } catch (err) {
-      toast.error('Error al cargar historial');
-    } finally {
-      setLoadingHist(false);
-    }
-  }, [fechaInicio, fechaFin]);
+      const res = await cajaAPI.obtenerActual();
+      if (res.data?.success) {
+        if (res.data.data) setCajaActual(res.data.data);
+        else clearCaja();
+      }
+    } catch (_) {}
+  }, [setCajaActual, clearCaja]);
 
-  useEffect(() => { fetchCaja(); }, []);
-  useEffect(() => { if (showHistorial) fetchHistorial(); }, [showHistorial]);
+  useEffect(() => { fetchCajaActual(); }, [fetchCajaActual]);
 
-  const apertura   = cajaData?.apertura;
-  const ventas     = cajaData?.ventas;
-  const cajaAbierta = apertura?.Estado === 'ABIERTA';
+  // Cargar ventas cuando hay caja
+  const fetchVentas = useCallback(async () => {
+    if (!cajaActual?.CajaID) return;
+    setLoadingVentas(true);
+    try {
+      const res = await cajaAPI.obtenerVentas(cajaActual.CajaID);
+      if (res.data?.success) setVentas(res.data.data ?? []);
+    } catch (_) {}
+    finally { setLoadingVentas(false); }
+  }, [cajaActual?.CajaID]);
+
+  useEffect(() => { fetchVentas(); }, [fetchVentas]);
+
+  // Cargar historial
+  const fetchHistorial = useCallback(async (desde, hasta) => {
+    setLoadingHistorial(true);
+    try {
+      const res = await cajaAPI.historial({ desde, hasta });
+      if (res.data?.success) setHistorial(res.data.data ?? []);
+    } catch (_) {}
+    finally { setLoadingHistorial(false); }
+  }, []);
+
+  useEffect(() => {
+    if (historialOpen) fetchHistorial(historialFechaDesde, historialFechaHasta);
+  }, [historialOpen, fetchHistorial]);
+
+  // ── Callback al abrir caja: refresca sin recargar página ──
+  const handleAperturaSuccess = useCallback(async () => {
+    setShowApertura(false);
+    await fetchCajaActual();
+    // Pequeño delay para asegurar que el estado del store se propagó
+    setTimeout(() => fetchVentas(), 300);
+  }, [fetchCajaActual, fetchVentas]);
+
+  // ── Callback al cerrar caja ───────────────────────────────
+  const handleCierreSuccess = useCallback(() => {
+    setShowCierre(false);
+    clearCaja();
+    setVentas([]);
+    fetchHistorial();
+    toast.success('Caja cerrada correctamente');
+  }, [clearCaja, fetchHistorial]);
+
+  // ── Exportar historial PDF ────────────────────────────────
+  const exportarHistorialPDF = async () => {
+    try {
+      const { default: jsPDF } = await import('jspdf');
+      const { default: autoTable } = await import('jspdf-autotable');
+      const doc = new jsPDF();
+      doc.setFontSize(16);
+      doc.text('Historial de Cortes — San José Boots', 14, 18);
+      doc.setFontSize(10); doc.setTextColor(100);
+      doc.text(`Generado: ${new Date().toLocaleString('es-MX')}`, 14, 25);
+      doc.setTextColor(0);
+      autoTable(doc, {
+        startY: 30,
+        head: [['Cajero', 'Apertura', 'Cierre', 'Fondo Inicial', 'Total Ventas', 'Monto Final', 'Diferencia', 'Estado']],
+        body: historial.map(c => [
+          c.NombreUsuario, fmtDate(c.FechaHoraApertura), fmtDate(c.FechaHoraCierre),
+          formatCurrency(c.MontoInicial), formatCurrency(c.TotalVentas),
+          formatCurrency(c.MontoFinalReal), formatCurrency(c.Diferencia), c.Estado
+        ]),
+        styles: { fontSize: 8 },
+        headStyles: { fillColor: [17, 24, 39] },
+      });
+      doc.save(`Historial_Cortes_${new Date().toISOString().slice(0,10)}.pdf`);
+    } catch (_) { toast.error('Instala jspdf y jspdf-autotable para exportar PDF'); }
+  };
+
+  // ── Exportar historial Excel ──────────────────────────────
+  const exportarHistorialExcel = () => {
+    const header = ['Cajero','Apertura','Cierre','Fondo Inicial','Total Ventas','Efectivo','Tarjeta','Transferencia','Monto Final','Diferencia','# Ventas','Estado'];
+    const rows = historial.map(c => [
+      c.NombreUsuario, fmtDate(c.FechaHoraApertura), fmtDate(c.FechaHoraCierre),
+      c.MontoInicial, c.TotalVentas, c.TotalVentasEfectivo,
+      c.TotalVentasTarjeta, c.TotalVentasTransferencia,
+      c.MontoFinalReal, c.Diferencia, c.NumeroVentas, c.Estado
+    ]);
+    const csv = [header, ...rows].map(r => r.map(v => `"${v ?? ''}"`).join(',')).join('\n');
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `Historial_Cortes_${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success('Archivo CSV descargado (ábrelo con Excel)');
+  };
+
+  const metodoBadge = (m) => {
+    if (m === 'Efectivo')      return 'bg-green-100 text-green-700';
+    if (m === 'Tarjeta')       return 'bg-blue-100 text-blue-700';
+    if (m === 'Transferencia') return 'bg-purple-100 text-purple-700';
+    return 'bg-gray-100 text-gray-700';
+  };
+
+  // ─────────────────────────────────────────────────────────
+  // RENDER: CAJA CERRADA
+  // ─────────────────────────────────────────────────────────
+  if (!cajaActual) return (
+    <Layout><div className="p-6">
+      <h1 className="text-2xl font-bold text-gray-900 mb-6">Caja</h1>
+
+      {/* Tarjeta caja cerrada */}
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-10 text-center mb-6">
+        <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+          <Lock className="h-8 w-8 text-red-500" />
+        </div>
+        <h2 className="text-xl font-bold text-gray-900 mb-2">Caja Cerrada</h2>
+        <p className="text-gray-500 text-sm mb-6 max-w-sm mx-auto">
+          Para realizar ventas debes abrir una caja. Registra el monto inicial en efectivo con el que comienzas el turno.
+        </p>
+        <button onClick={() => setShowApertura(true)}
+                className="inline-flex items-center gap-2 bg-green-600 hover:bg-green-700
+                           text-white font-semibold px-6 py-3 rounded-xl transition">
+          <Unlock className="h-5 w-5" /> Abrir Caja
+        </button>
+      </div>
+
+      {/* Historial */}
+      <HistorialSection
+        historialOpen={historialOpen} setHistorialOpen={setHistorialOpen}
+        historial={historial} loadingHistorial={loadingHistorial}
+        historialFechaDesde={historialFechaDesde} setHistorialFechaDesde={setHistorialFechaDesde}
+        historialFechaHasta={historialFechaHasta} setHistorialFechaHasta={setHistorialFechaHasta}
+        fetchHistorial={fetchHistorial}
+        exportarPDF={exportarHistorialPDF} exportarExcel={exportarHistorialExcel}
+        fmtDate={fmtDate}
+      />
+
+      {showApertura && <AperturaCajaModal onSuccess={handleAperturaSuccess} />}
+    </div></Layout>
+  );
+
+  // ─────────────────────────────────────────────────────────
+  // RENDER: CAJA ABIERTA
+  // ─────────────────────────────────────────────────────────
+  const efectivoVentas = parseFloat(cajaActual.TotalVentasEfectivo ?? 0);
+  const tarjetaTrans   = parseFloat(cajaActual.TotalVentasTarjeta ?? 0) + parseFloat(cajaActual.TotalVentasTransferencia ?? 0);
+  const totalVentas    = parseFloat(cajaActual.TotalVentas ?? 0);
+  const fondoInicial   = parseFloat(cajaActual.MontoInicial ?? 0);
+  const deberiaHaber   = fondoInicial + efectivoVentas;
 
   return (
-    <Layout>
-      <div className="space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">Caja</h1>
-            <p className="text-sm text-gray-500 mt-0.5">Control de apertura y corte diario</p>
-          </div>
-          <button onClick={fetchCaja} className="p-2 hover:bg-white rounded-lg transition-colors text-gray-500 hover:text-gray-700">
-            <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+    <Layout><div className="p-6">
+      {/* ── Encabezado con botones ── */}
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Caja en Curso</h1>
+          <p className="text-sm text-gray-500 mt-0.5">
+            Abierta desde las {new Date(cajaActual.FechaHoraApertura).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'})}
+            &nbsp;({timeSince(cajaActual.FechaHoraApertura)})
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {/* Actualizar ventas */}
+          <button onClick={fetchVentas} title="Actualizar"
+                  className="p-2 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition">
+            <RefreshCw className="h-5 w-5" />
+          </button>
+          {/* Movimiento extra */}
+          <button onClick={() => setShowMovimiento(true)}
+                  className="flex items-center gap-1.5 border border-gray-300 text-gray-700
+                             hover:bg-gray-50 font-medium px-3 py-2 rounded-xl transition text-sm">
+            <Plus className="h-4 w-4" /> Movimiento
+          </button>
+          {/* Corte sin cerrar */}
+          <button onClick={() => setShowCorte(true)}
+                  className="flex items-center gap-1.5 border border-blue-300 text-blue-700
+                             hover:bg-blue-50 font-medium px-3 py-2 rounded-xl transition text-sm">
+            <FileText className="h-4 w-4" /> Corte
+          </button>
+          {/* Cerrar caja */}
+          <button onClick={() => setShowCierre(true)}
+                  className="flex items-center gap-2 bg-gray-900 hover:bg-gray-700
+                             text-white font-semibold px-4 py-2 rounded-xl transition">
+            <Lock className="h-4 w-4" /> Cerrar Caja
           </button>
         </div>
+      </div>
 
-        {loading ? (
-          <div className="flex items-center justify-center py-20">
-            <RefreshCw className="w-6 h-6 text-amber-700 animate-spin" />
-            <span className="ml-2 text-sm text-gray-500">Cargando estado de caja...</span>
-          </div>
+      {/* ── KPIs ── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        {[
+          { icon: DollarSign,    label: 'Fondo Inicial',   value: formatCurrency(fondoInicial),   color: 'text-gray-700' },
+          { icon: DollarSign,    label: 'Efectivo',         value: formatCurrency(efectivoVentas), color: 'text-green-700' },
+          { icon: CreditCard,    label: 'Tarjeta / Trans.', value: formatCurrency(tarjetaTrans),   color: 'text-blue-700'  },
+          { icon: TrendingUp,    label: 'Total Ventas',     value: formatCurrency(totalVentas),    color: 'text-gray-900'  },
+        ].map(k => {
+          const Icon = k.icon;
+          return (
+            <div key={k.label} className="bg-white rounded-2xl border border-gray-100 shadow-sm px-5 py-4">
+              <Icon className="h-5 w-5 text-gray-400 mb-2" />
+              <p className="text-xs text-gray-500">{k.label}</p>
+              <p className={`text-xl font-bold mt-0.5 ${k.color}`}>{k.value}</p>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Arqueo en tiempo real ── */}
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm px-6 py-4 mb-6">
+        <h3 className="text-sm font-semibold text-gray-700 mb-3">Arqueo en tiempo real</h3>
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-gray-500">Inicial:</span>
+          <span className="font-semibold text-gray-800">{formatCurrency(fondoInicial)}</span>
+          <span className="text-gray-400">+</span>
+          <span className="text-gray-500">Efectivo:</span>
+          <span className="font-semibold text-green-700">{formatCurrency(efectivoVentas)}</span>
+          <span className="text-gray-400">=</span>
+          <span className="text-gray-500">Debería haber:</span>
+          <span className="font-bold text-gray-900 text-base">{formatCurrency(deberiaHaber)}</span>
+        </div>
+        <p className="text-xs text-gray-400 mt-1.5">
+          Número de transacciones: {cajaActual.NumeroVentas ?? 0}
+          &nbsp;·&nbsp; Tarjeta/Transferencia no entra al arqueo de efectivo
+        </p>
+      </div>
+
+      {/* ── Ventas del turno ── */}
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm px-6 py-4 mb-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-gray-700">
+            Ventas de este turno ({ventas.length})
+          </h3>
+          <button onClick={fetchVentas} disabled={loadingVentas}
+                  className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 transition">
+            <RefreshCw className={`h-3.5 w-3.5 ${loadingVentas ? 'animate-spin' : ''}`} />
+            Actualizar
+          </button>
+        </div>
+        {ventas.length === 0 ? (
+          <p className="text-gray-400 text-sm text-center py-6">Sin ventas registradas en este turno</p>
         ) : (
-          <>
-            {/* Estado de caja */}
-            <div className={`rounded-2xl border-2 p-6 ${cajaAbierta
-              ? 'bg-green-50 border-green-200'
-              : 'bg-gray-50 border-gray-200'}`}>
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div className="flex items-center gap-4">
-                  <div className={`w-14 h-14 rounded-2xl flex items-center justify-center ${cajaAbierta ? 'bg-green-100' : 'bg-gray-200'}`}>
-                    <DollarSign className={`w-7 h-7 ${cajaAbierta ? 'text-green-600' : 'text-gray-400'}`} />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h2 className="text-lg font-bold text-gray-800">
-                        {cajaAbierta ? 'Caja Abierta' : 'Caja Cerrada'}
-                      </h2>
-                      {cajaAbierta
-                        ? <span className="px-2 py-0.5 bg-green-200 text-green-800 text-xs font-semibold rounded-full">ACTIVA</span>
-                        : <span className="px-2 py-0.5 bg-gray-200 text-gray-600 text-xs font-semibold rounded-full">CERRADA</span>
-                      }
-                    </div>
-                    {cajaAbierta
-                      ? <p className="text-sm text-gray-600 mt-0.5">Abierta el {fmtDateTime(apertura.FechaApertura)} · Monto inicial: <strong>{fmt(apertura.MontoInicial)}</strong></p>
-                      : <p className="text-sm text-gray-500 mt-0.5">No hay caja abierta hoy. Abre la caja para comenzar a operar.</p>
-                    }
-                  </div>
-                </div>
-                <div className="flex gap-3">
-                  {!cajaAbierta && (
-                    <button onClick={() => setModalAbrir(true)}
-                      className="h-11 px-6 bg-amber-700 hover:bg-amber-800 text-white text-sm font-semibold rounded-xl transition-colors shadow-sm">
-                      Abrir Caja
-                    </button>
-                  )}
-                  {cajaAbierta && (
-                    <button onClick={() => setModalCorte(true)}
-                      className="h-11 px-6 bg-gray-800 hover:bg-gray-900 text-white text-sm font-semibold rounded-xl transition-colors shadow-sm flex items-center gap-2">
-                      <FileText className="w-4 h-4" />
-                      Realizar Corte
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Ventas del día */}
-            {cajaAbierta && ventas && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {[
-                  { label: 'Ventas Efectivo',    value: fmt(ventas.VentasEfectivo),      icon: DollarSign,   color: 'text-amber-700',  bg: 'bg-amber-50'  },
-                  { label: 'Ventas Tarjeta',      value: fmt(ventas.VentasTarjeta),       icon: CreditCard,   color: 'text-blue-600',   bg: 'bg-blue-50'   },
-                  { label: 'Transferencias',      value: fmt(ventas.VentasTransferencia), icon: Smartphone,   color: 'text-purple-600', bg: 'bg-purple-50' },
-                  { label: 'Total del Día',       value: fmt(ventas.TotalVentas),         icon: TrendingUp,   color: 'text-green-600',  bg: 'bg-green-50'  },
-                ].map((k, i) => (
-                  <div key={i} className="bg-white rounded-xl border border-gray-200 shadow-sm px-5 py-4 flex items-center gap-4">
-                    <div className={`p-2.5 rounded-lg ${k.bg} ${k.color}`}>
-                      <k.icon className="w-5 h-5" />
-                    </div>
-                    <div>
-                      <p className="text-xs text-gray-500">{k.label}</p>
-                      <p className="text-lg font-bold text-gray-800">{k.value}</p>
-                    </div>
-                  </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-gray-500 border-b border-gray-100">
+                  <th className="text-left pb-2 font-medium"># Venta</th>
+                  <th className="text-left pb-2 font-medium">Hora</th>
+                  <th className="text-left pb-2 font-medium">Método de pago</th>
+                  <th className="text-right pb-2 font-medium">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ventas.map((v, i) => (
+                  <tr key={v.VentaID} className={`border-b border-gray-50 ${i % 2 === 0 ? '' : 'bg-gray-50/50'}`}>
+                    <td className="py-2 text-gray-700 font-medium">#{v.VentaID}</td>
+                    <td className="py-2 text-gray-500">
+                      {new Date(v.FechaVenta).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}
+                    </td>
+                    <td className="py-2">
+                      <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${metodoBadge(v.MetodoPago)}`}>
+                        {v.MetodoPago}
+                      </span>
+                    </td>
+                    <td className="py-2 text-right font-semibold text-gray-900">{formatCurrency(v.Total)}</td>
+                  </tr>
                 ))}
-              </div>
-            )}
-
-            {/* Detalle ventas del día */}
-            {cajaAbierta && ventas && (
-              <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-                <h3 className="text-base font-semibold text-gray-800 mb-4">Resumen del día</h3>
-                <div className="space-y-3">
-                  {[
-                    { label: 'Monto inicial en caja',  value: fmt(apertura?.MontoInicial),    bold: false },
-                    { label: 'Ventas en efectivo',      value: fmt(ventas.VentasEfectivo),     bold: false },
-                    { label: 'Efectivo esperado en caja', value: fmt((parseFloat(apertura?.MontoInicial) || 0) + (ventas.VentasEfectivo || 0)), bold: true },
-                    { label: 'Ventas con tarjeta',      value: fmt(ventas.VentasTarjeta),      bold: false },
-                    { label: 'Ventas por transferencia',value: fmt(ventas.VentasTransferencia),bold: false },
-                    { label: 'Número de ventas',        value: `${ventas.NumeroVentas} ventas`, bold: false },
-                    { label: 'Total ingresos del día',  value: fmt(ventas.TotalVentas),        bold: true  },
-                  ].map((r, i) => (
-                    <div key={i} className={`flex justify-between items-center py-2.5 border-b border-gray-50 last:border-0 ${r.bold ? 'border-t border-gray-200 mt-1 pt-3' : ''}`}>
-                      <span className={`text-sm ${r.bold ? 'font-semibold text-gray-700' : 'text-gray-500'}`}>{r.label}</span>
-                      <span className={`text-sm ${r.bold ? 'font-bold text-amber-700 text-base' : 'font-medium text-gray-700'}`}>{r.value}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Historial de cortes */}
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
-              <button
-                onClick={() => setShowHistorial(p => !p)}
-                className="w-full flex items-center justify-between px-6 py-4 hover:bg-gray-50 transition-colors rounded-xl"
-              >
-                <span className="text-base font-semibold text-gray-800">Historial de Cortes</span>
-                {showHistorial ? <ChevronUp className="w-5 h-5 text-gray-400" /> : <ChevronDown className="w-5 h-5 text-gray-400" />}
-              </button>
-
-              {showHistorial && (
-                <div className="border-t border-gray-100">
-                  {/* Filtros */}
-                  <div className="px-6 py-3 flex flex-wrap gap-3 items-end border-b border-gray-100">
-                    <div className="flex flex-col gap-1">
-                      <label className="text-xs font-medium text-gray-500">Desde</label>
-                      <input type="date" value={fechaInicio} onChange={e => setFechaInicio(e.target.value)}
-                        className="h-9 px-3 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white" />
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <label className="text-xs font-medium text-gray-500">Hasta</label>
-                      <input type="date" value={fechaFin} onChange={e => setFechaFin(e.target.value)}
-                        className="h-9 px-3 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white" />
-                    </div>
-                    <button onClick={fetchHistorial}
-                      className="h-9 px-4 bg-amber-700 hover:bg-amber-800 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2">
-                      {loadingHist ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : null}
-                      Buscar
-                    </button>
-                  </div>
-
-                  {/* Tabla historial */}
-                  <div className="overflow-x-auto">
-                    {loadingHist ? (
-                      <div className="flex items-center justify-center py-10">
-                        <RefreshCw className="w-5 h-5 text-amber-700 animate-spin" />
-                        <span className="ml-2 text-sm text-gray-500">Cargando...</span>
-                      </div>
-                    ) : historial.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center py-12 text-gray-400">
-                        <FileText className="w-8 h-8 mb-2 opacity-30" />
-                        <p className="text-sm">Sin cortes en este período</p>
-                      </div>
-                    ) : (
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
-                            <th className="px-4 py-3 text-left">Fecha Corte</th>
-                            <th className="px-4 py-3 text-left">Cajero</th>
-                            <th className="px-4 py-3 text-right">Monto Inicial</th>
-                            <th className="px-4 py-3 text-right">Ef. Ventas</th>
-                            <th className="px-4 py-3 text-right">Tarjeta</th>
-                            <th className="px-4 py-3 text-right">Transfer.</th>
-                            <th className="px-4 py-3 text-right">Total Sistema</th>
-                            <th className="px-4 py-3 text-right">Ef. Contado</th>
-                            <th className="px-4 py-3 text-right">Diferencia</th>
-                            <th className="px-4 py-3 text-center">Estado</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-50">
-                          {historial.map((c, i) => (
-                            <tr key={i} className="hover:bg-gray-50 transition-colors">
-                              <td className="px-4 py-3 text-xs text-gray-500">{fmtDateTime(c.FechaCorte)}</td>
-                              <td className="px-4 py-3 font-medium text-gray-800">{c.Cajero}</td>
-                              <td className="px-4 py-3 text-right text-gray-600">{fmt(c.MontoInicial)}</td>
-                              <td className="px-4 py-3 text-right text-gray-600">{fmt(c.VentasEfectivo)}</td>
-                              <td className="px-4 py-3 text-right text-gray-600">{fmt(c.VentasTarjeta)}</td>
-                              <td className="px-4 py-3 text-right text-gray-600">{fmt(c.VentasTransferencia)}</td>
-                              <td className="px-4 py-3 text-right font-semibold text-gray-700">{fmt(c.TotalVentasSistema)}</td>
-                              <td className="px-4 py-3 text-right text-gray-700">{fmt(c.EfectivoContado)}</td>
-                              <td className={`px-4 py-3 text-right font-bold ${parseFloat(c.Diferencia) > 0 ? 'text-blue-600' : parseFloat(c.Diferencia) < 0 ? 'text-red-600' : 'text-green-600'}`}>
-                                {parseFloat(c.Diferencia) >= 0 ? '+' : ''}{fmt(c.Diferencia)}
-                              </td>
-                              <td className="px-4 py-3 text-center"><EstadoBadge estado={c.Estado} /></td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          </>
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 
-      {/* Modals */}
-      <ModalAbrirCaja open={modalAbrir} onClose={() => setModalAbrir(false)} onSuccess={fetchCaja} />
-      <ModalCorte
-        open={modalCorte}
-        onClose={() => setModalCorte(false)}
-        apertura={apertura}
-        ventas={ventas}
-        onSuccess={fetchCaja}
+      {/* ── Historial ── */}
+      <HistorialSection
+        historialOpen={historialOpen} setHistorialOpen={setHistorialOpen}
+        historial={historial} loadingHistorial={loadingHistorial}
+        historialFechaDesde={historialFechaDesde} setHistorialFechaDesde={setHistorialFechaDesde}
+        historialFechaHasta={historialFechaHasta} setHistorialFechaHasta={setHistorialFechaHasta}
+        fetchHistorial={fetchHistorial}
+        exportarPDF={exportarHistorialPDF} exportarExcel={exportarHistorialExcel}
+        fmtDate={fmtDate}
       />
-    </Layout>
-  );
-};
 
-export default CajaPage;
+      {/* ── Modales ── */}
+      {showMovimiento && (
+        <MovimientoCajaModal
+          cajaId={cajaActual.CajaID}
+          onClose={() => setShowMovimiento(false)}
+          onSuccess={fetchVentas}
+        />
+      )}
+      {showCorte && (
+        <CorteModal cajaId={cajaActual.CajaID} onClose={() => setShowCorte(false)} />
+      )}
+      {showCierre && (
+        <CierreCajaModal
+          caja={cajaActual}
+          onClose={() => setShowCierre(false)}
+          onSuccess={handleCierreSuccess}
+        />
+      )}
+    </div></Layout>
+  );
+
+}
+
+// ── Sub-componente historial ─────────────────────────────────
+function HistorialSection({
+  historialOpen, setHistorialOpen, historial, loadingHistorial,
+  historialFechaDesde, setHistorialFechaDesde,
+  historialFechaHasta, setHistorialFechaHasta,
+  fetchHistorial, exportarPDF, exportarExcel, fmtDate
+}) {
+  const estadoBadge = (e) => e === 'Abierta' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600';
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+      <button
+        onClick={() => setHistorialOpen(o => !o)}
+        className="w-full flex items-center justify-between px-6 py-4 hover:bg-gray-50 transition">
+        <span className="font-semibold text-gray-700">Historial de Cortes</span>
+        {historialOpen ? <ChevronUp className="h-5 w-5 text-gray-400" /> : <ChevronDown className="h-5 w-5 text-gray-400" />}
+      </button>
+
+      {historialOpen && (
+        <div className="border-t border-gray-100">
+          {/* Filtros + exportar */}
+          <div className="flex flex-wrap items-end gap-3 px-6 py-4 bg-gray-50">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Desde</label>
+              <input type="date" value={historialFechaDesde} onChange={e => setHistorialFechaDesde(e.target.value)}
+                     className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm" />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Hasta</label>
+              <input type="date" value={historialFechaHasta} onChange={e => setHistorialFechaHasta(e.target.value)}
+                     className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm" />
+            </div>
+            <button onClick={() => fetchHistorial(historialFechaDesde, historialFechaHasta)}
+                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm font-medium px-4 py-2 rounded-lg hover:bg-gray-700 transition">
+              <Calendar className="h-4 w-4" /> Filtrar
+            </button>
+            <button onClick={() => fetchHistorial(historialFechaDesde, historialFechaHasta)}
+                    title="Actualizar"
+                    className="flex items-center gap-1.5 border border-gray-300 text-gray-600
+                               text-sm font-medium px-3 py-2 rounded-lg hover:bg-gray-100 transition">
+              <RefreshCw className="h-4 w-4" /> Actualizar
+            </button>
+            <div className="ml-auto flex gap-2">
+              <button onClick={exportarPDF}
+                      className="flex items-center gap-1.5 border border-blue-300 text-blue-700
+                                 text-sm font-medium px-3 py-2 rounded-lg hover:bg-blue-50 transition">
+                <Printer className="h-4 w-4" /> PDF
+              </button>
+              <button onClick={exportarExcel}
+                      className="flex items-center gap-1.5 border border-green-300 text-green-700
+                                 text-sm font-medium px-3 py-2 rounded-lg hover:bg-green-50 transition">
+                <Sheet className="h-4 w-4" /> Excel
+              </button>
+            </div>
+          </div>
+
+          {/* Tabla */}
+          <div className="overflow-x-auto px-6 pb-6">
+            {loadingHistorial ? (
+              <p className="text-center text-gray-400 py-8 text-sm">Cargando...</p>
+            ) : historial.length === 0 ? (
+              <p className="text-center text-gray-400 py-8 text-sm">Sin cortes en el período seleccionado</p>
+            ) : (
+              <div className="space-y-3 mt-2">
+                {historial.map((c) => {
+                  const mxn = v => new Intl.NumberFormat('es-MX',{style:'currency',currency:'MXN'}).format(v ?? 0);
+                  const duracion = () => {
+                    if (!c.FechaHoraCierre) return null;
+                    const mins = Math.round((new Date(c.FechaHoraCierre) - new Date(c.FechaHoraApertura)) / 60000);
+                    if (mins < 60) return `${mins} min`;
+                    return `${Math.floor(mins/60)}h ${mins%60}m`;
+                  };
+                  const dif = parseFloat(c.Diferencia ?? 0);
+                  const abierta = c.Estado === 'Abierta';
+                  const deberiaHaber = parseFloat(c.MontoInicial ?? 0) + parseFloat(c.TotalVentasEfectivo ?? 0);
+                  return (
+                    <div key={c.CajaID} className={`border rounded-xl overflow-hidden ${abierta ? 'border-green-200' : 'border-gray-200'} bg-white`}>
+
+                      {/* ── Cabecera ── */}
+                      <div className={`flex items-center justify-between px-4 py-2.5 border-b ${abierta ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200'}`}>
+                        <div className="flex items-center gap-2.5">
+                          <span className="font-semibold text-gray-900 text-sm">{c.NombreUsuario}</span>
+                          <span className="text-gray-400 text-xs">#{c.CajaID}</span>
+                          <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${abierta ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-600'}`}>
+                            {c.Estado}
+                          </span>
+                          {duracion() && <span className="text-xs text-gray-400">⏱ {duracion()}</span>}
+                        </div>
+                        <div className="text-right text-xs text-gray-500 space-y-0.5">
+                          <div>Apertura: <span className="font-medium text-gray-700">{fmtDate(c.FechaHoraApertura)}</span></div>
+                          {c.FechaHoraCierre && <div>Cierre: <span className="font-medium text-gray-700">{fmtDate(c.FechaHoraCierre)}</span></div>}
+                        </div>
+                      </div>
+
+                      {/* ── Métricas ── */}
+                      <div className="grid grid-cols-2 md:grid-cols-4 divide-x divide-y md:divide-y-0 divide-gray-100">
+
+                        {/* Bloque 1: Arqueo de efectivo */}
+                        <div className="px-4 py-3 col-span-2 md:col-span-1 bg-gray-50/60 border-b md:border-b-0 border-gray-100">
+                          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Arqueo efectivo</p>
+                          <div className="space-y-1 text-xs text-gray-500">
+                            <div className="flex justify-between">
+                              <span>Fondo inicial</span>
+                              <span className="font-medium text-gray-700">{mxn(c.MontoInicial)}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>+ Ventas efectivo</span>
+                              <span className="font-medium text-green-700">{mxn(c.TotalVentasEfectivo)}</span>
+                            </div>
+                            <div className="flex justify-between pt-1 border-t border-gray-200 font-semibold text-gray-800 text-sm">
+                              <span>= Debería haber</span>
+                              <span>{mxn(deberiaHaber)}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Bloque 2: Ventas por método */}
+                        <div className="px-4 py-3">
+                          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Ventas</p>
+                          <div className="space-y-1 text-xs text-gray-500">
+                            <div className="flex justify-between">
+                              <span>Efectivo</span>
+                              <span className="font-medium text-green-700">{mxn(c.TotalVentasEfectivo)}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>Tarjeta</span>
+                              <span className="font-medium text-blue-700">{mxn(c.TotalVentasTarjeta)}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>Transferencia</span>
+                              <span className="font-medium text-purple-700">{mxn(c.TotalVentasTransferencia)}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Bloque 3: Total general */}
+                        <div className="px-4 py-3">
+                          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Total general</p>
+                          <p className="text-xl font-bold text-gray-900">{mxn(c.TotalVentas)}</p>
+                          <p className="text-xs text-gray-400 mt-0.5">{c.NumeroVentas ?? 0} ventas registradas</p>
+                        </div>
+
+                        {/* Bloque 4: Resultado del corte */}
+                        <div className={`px-4 py-3 ${c.Diferencia == null ? '' : dif < 0 ? 'bg-red-50/60' : dif > 0 ? 'bg-green-50/60' : 'bg-gray-50/60'}`}>
+                          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Resultado corte</p>
+                          {c.Diferencia == null || !c.FechaHoraCierre ? (
+                            <p className="text-xs text-gray-400 italic">Turno activo — sin cerrar</p>
+                          ) : (
+                            <>
+                              <p className={`text-xl font-bold ${dif < 0 ? 'text-red-600' : dif > 0 ? 'text-green-600' : 'text-gray-700'}`}>
+                                {dif === 0 ? '✓ Cuadrado' : (dif > 0 ? '+' : '') + mxn(dif)}
+                              </p>
+                              <p className={`text-xs mt-0.5 font-medium ${dif < 0 ? 'text-red-500' : dif > 0 ? 'text-green-600' : 'text-gray-500'}`}>
+                                {dif < 0 ? `Faltante de ${mxn(Math.abs(dif))}` : dif > 0 ? `Sobrante de ${mxn(dif)}` : 'Caja cuadrada'}
+                              </p>
+                              <p className="text-xs text-gray-400 mt-1">Contado: {mxn(c.MontoFinalDeclarado)}</p>
+                            </>
+                          )}
+                        </div>
+
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

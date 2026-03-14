@@ -1,21 +1,29 @@
-// src/routes/caja.routes.js
-const express         = require('express');
-const router          = express.Router();
-const { authenticateToken, checkRole } = require('../middlewares/auth.middleware');
-const cajaController  = require('../controllers/Caja.controller');
+// src/routes/caja.routes.js — VERSIÓN COMPLETA FASE 6
+// Reemplaza tu archivo actual
 
-router.use(authenticateToken);
+const express = require('express');
+const router = express.Router();
+const {
+  obtenerCajaActual,
+  abrirCaja,
+  cerrarCaja,
+  obtenerVentasCaja,
+  historialCajas,
+  ultimoCierre,
+  registrarMovimiento,
+  obtenerMovimientos,
+  resumenCompleto,
+} = require('../controllers/caja.controller');
+const { authenticateToken: authMiddleware } = require('../middlewares/auth.middleware');
 
-// Estado actual de la caja (todos los autenticados)
-router.get('/actual', cajaController.getCajaActual);
-
-// Historial de cortes (solo Administrador y Gerente)
-router.get('/historial', checkRole('Administrador', 'Gerente'), cajaController.getHistorialCortes);
-
-// Abrir caja (Administrador y Gerente)
-router.post('/abrir', checkRole('Administrador', 'Gerente'), cajaController.abrirCaja);
-
-// Realizar corte (Administrador y Gerente)
-router.post('/corte', checkRole('Administrador', 'Gerente'), cajaController.realizarCorte);
+router.get('/actual',                  authMiddleware, obtenerCajaActual);
+router.post('/abrir',                  authMiddleware, abrirCaja);
+router.put('/cerrar/:id',              authMiddleware, cerrarCaja);
+router.get('/historial',               authMiddleware, historialCajas);
+router.get('/ultimo-cierre',           authMiddleware, ultimoCierre);
+router.post('/movimiento',             authMiddleware, registrarMovimiento);
+router.get('/:id/ventas',              authMiddleware, obtenerVentasCaja);
+router.get('/:id/movimientos',         authMiddleware, obtenerMovimientos);
+router.get('/:id/resumen-completo',    authMiddleware, resumenCompleto);
 
 module.exports = router;

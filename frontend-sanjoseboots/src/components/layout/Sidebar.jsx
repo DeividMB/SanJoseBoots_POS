@@ -1,85 +1,86 @@
-import React from 'react';
-import { NavLink } from 'react-router-dom';
-import { 
-  LayoutDashboard, 
-  ShoppingCart, 
-  Package, 
-  BarChart3, 
-  Users,
-  Wallet,
-  LogOut 
+// src/components/layout/Sidebar.jsx
+import { NavLink, useNavigate } from 'react-router-dom';
+import {
+  LayoutDashboard, ShoppingCart, Package,
+  BarChart2, Archive, Users, LogOut,
 } from 'lucide-react';
 import useAuthStore from '../../store/authStore';
+import useCajaStore from '../../store/cajaStore';
 
-const Sidebar = () => {
+const navItems = [
+  { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard'      },
+  { to: '/pos',       icon: ShoppingCart,    label: 'Punto de Venta' },
+  { to: '/products',  icon: Package,         label: 'Productos'      },
+  { to: '/reports',   icon: BarChart2,       label: 'Reportes'       },
+  { to: '/caja',      icon: Archive,         label: 'Caja'           },
+  { to: '/users',     icon: Users,           label: 'Usuarios'       },
+];
+
+export default function Sidebar() {
   const { user, logout } = useAuthStore();
+  const { clearCaja }    = useCajaStore();
+  const navigate         = useNavigate();
 
-  // Compatible con user.role y user.rol (por si el authStore usa cualquiera de los dos)
-  const userRole = user?.role || user?.rol || '';
-
-  const menuItems = [
-    { path: '/dashboard', icon: LayoutDashboard, label: 'Dashboard',      roles: ['Administrador', 'Vendedor', 'Gerente', 'Cajero'] },
-    { path: '/pos',       icon: ShoppingCart,    label: 'Punto de Venta', roles: ['Administrador', 'Vendedor', 'Gerente', 'Cajero'] },
-    { path: '/products',  icon: Package,         label: 'Productos',      roles: ['Administrador', 'Vendedor', 'Gerente'] },
-    { path: '/reports',   icon: BarChart3,        label: 'Reportes',       roles: ['Administrador', 'Gerente'] },
-    { path: '/caja',      icon: Wallet,          label: 'Caja',           roles: ['Administrador', 'Gerente'] },
-    { path: '/users',     icon: Users,           label: 'Usuarios',       roles: ['Administrador'] },
-  ];
-
-  const filteredMenuItems = menuItems.filter(item =>
-    item.roles.includes(userRole)
-  );
+  const handleLogout = () => {
+    clearCaja();
+    logout();
+    navigate('/login');
+  };
 
   return (
-    <aside className="fixed left-0 top-0 h-screen w-64 bg-primary text-white shadow-xl z-40 flex flex-col">
-      {/* Logo */}
-      <div className="px-6 py-5 border-b border-white/10 flex flex-col items-center">
-        <div className="bg-white rounded-xl p-3 mb-2">
-          <img
-            src="/logo-sanjose.png"
-            alt="San José Boots"
-            className="h-14 w-auto object-contain"
-          />
-        </div>
-        <p className="text-xs text-white/60">Sistema POS</p>
+    // w-72 = 288px
+    <aside className="w-72 min-h-screen bg-gray-900 flex flex-col select-none fixed left-0 top-0 z-20">
+
+      {/* ── Nombre sistema ── */}
+      <div className="px-7 pt-7 pb-6 border-b border-white/10">
+        <p className="text-white text-xs font-semibold tracking-widest uppercase opacity-40">
+          Sistema POS
+        </p>
+        <p className="text-white text-xl font-bold mt-1 leading-tight">
+          San José Boots
+        </p>
       </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto custom-scrollbar">
-        {filteredMenuItems.map((item) => (
+      {/* ── Navegación ── */}
+      <nav className="flex-1 px-4 py-5 space-y-1 overflow-y-auto">
+        {navItems.map(({ to, icon: Icon, label }) => (
           <NavLink
-            key={item.path}
-            to={item.path}
+            key={to}
+            to={to}
             className={({ isActive }) =>
-              `flex items-center gap-3 px-4 py-3 rounded-lg transition-all duration-200 ${
+              `flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors ${
                 isActive
-                  ? 'bg-accent text-white shadow-lg'
-                  : 'text-white/70 hover:bg-white/10 hover:text-white'
+                  ? 'bg-white/15 text-white'
+                  : 'text-gray-400 hover:bg-white/10 hover:text-white'
               }`
             }
           >
-            <item.icon className="h-5 w-5" />
-            <span className="font-medium">{item.label}</span>
+            <Icon className="h-[18px] w-[18px] flex-shrink-0" />
+            <span>{label}</span>
           </NavLink>
         ))}
       </nav>
 
-      {/* User Info & Logout */}
-      <div className="px-4 py-6 border-t border-white/10">
-        <div className="px-4 py-3 bg-white/5 rounded-lg mb-3">
-          <p className="text-sm font-medium">{user?.username}</p>
-          <p className="text-xs text-white/60">{userRole}</p>
+      {/* ── Usuario + logout ── */}
+      <div className="px-4 pb-5 border-t border-white/10 pt-4 space-y-1">
+        <div className="px-4 py-2">
+          <p className="text-white text-sm font-semibold leading-tight truncate">
+            {user?.NombreCompleto ?? user?.nombre ?? user?.username ?? 'Usuario'}
+          </p>
+          <p className="text-gray-500 text-xs mt-0.5 truncate">
+            {user?.rol ?? user?.Rol ?? 'Cajero'}
+          </p>
         </div>
         <button
-          onClick={logout}
-          className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-white/70 hover:bg-red-500/20 hover:text-white transition-all duration-200"
+          onClick={handleLogout}
+          className="w-full flex items-center gap-3 px-4 py-3 rounded-lg
+                     text-gray-400 hover:bg-red-500/15 hover:text-red-400
+                     text-sm font-medium transition-colors"
         >
-          <LogOut className="h-5 w-5" />
-          <span className="font-medium">Cerrar Sesión</span>
+          <LogOut className="h-[18px] w-[18px] flex-shrink-0" />
+          <span>Cerrar Sesión</span>
         </button>
       </div>
     </aside>
   );
-};
-
-export default Sidebar;
+}
