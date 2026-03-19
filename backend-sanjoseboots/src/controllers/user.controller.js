@@ -1,35 +1,23 @@
-// src/controllers/user.controller.js
+// src/controllers/user.controller.js — VERSIÓN CORREGIDA
+// Cambio: executeQuery ahora retorna [rows]. Todos los accesos usan
+// const [users] = await executeQuery(...) en vez de users directamente.
+
 const bcrypt = require('bcryptjs');
 const { executeQuery, executeTransaction } = require('../config/database');
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-const cleanUser = (u) => {
-  const { PasswordHash, ...safe } = u;
-  return safe;
-};
-
-// ─── 1. Listar usuarios ───────────────────────────────────────────────────────
+// ─── 1. Listar usuarios ───────────────────────────────────────
 exports.getAllUsers = async (req, res) => {
   try {
     console.log('👥 Obteniendo usuarios...');
-
-    const users = await executeQuery(`
+    const [users] = await executeQuery(`
       SELECT
-        u.UsuarioID,
-        u.NombreCompleto,
-        u.Email,
-        u.Username,
-        u.RolID,
-        r.NombreRol,
-        r.Permisos,
-        u.Activo,
-        u.FechaCreacion,
-        u.UltimoAcceso
+        u.UsuarioID, u.NombreCompleto, u.Email, u.Username,
+        u.RolID, r.NombreRol, r.Permisos,
+        u.Activo, u.FechaCreacion, u.UltimoAcceso
       FROM usuarios u
       INNER JOIN roles r ON u.RolID = r.RolID
       ORDER BY u.Activo DESC, u.NombreCompleto ASC
     `);
-
     console.log(`✅ ${users.length} usuarios obtenidos`);
     res.json({ success: true, data: users });
   } catch (error) {
@@ -38,12 +26,11 @@ exports.getAllUsers = async (req, res) => {
   }
 };
 
-// ─── 2. Obtener usuario por ID ────────────────────────────────────────────────
+// ─── 2. Obtener usuario por ID ────────────────────────────────
 exports.getUserById = async (req, res) => {
   try {
     const { id } = req.params;
-
-    const users = await executeQuery(`
+    const [users] = await executeQuery(`
       SELECT
         u.UsuarioID, u.NombreCompleto, u.Email, u.Username,
         u.RolID, r.NombreRol, r.Permisos,
@@ -53,10 +40,9 @@ exports.getUserById = async (req, res) => {
       WHERE u.UsuarioID = ?
     `, [id]);
 
-    if (!users.length) {
+    if (!users || users.length === 0) {
       return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
     }
-
     res.json({ success: true, data: users[0] });
   } catch (error) {
     console.error('❌ Error obteniendo usuario:', error);
@@ -64,19 +50,17 @@ exports.getUserById = async (req, res) => {
   }
 };
 
-// ─── 3. Crear usuario ─────────────────────────────────────────────────────────
+// ─── 3. Crear usuario ─────────────────────────────────────────
 exports.createUser = async (req, res) => {
   try {
     const { NombreCompleto, Email, Username, Password, RolID } = req.body;
 
-    // Validaciones
     if (!NombreCompleto || !Email || !Username || !Password || !RolID) {
       return res.status(400).json({
         success: false,
         message: 'Todos los campos son requeridos: NombreCompleto, Email, Username, Password, RolID',
       });
     }
-
     if (Password.length < 6) {
       return res.status(400).json({ success: false, message: 'La contraseña debe tener al menos 6 caracteres' });
     }
@@ -84,19 +68,16 @@ exports.createUser = async (req, res) => {
     console.log(`📝 Creando usuario: ${Username}`);
 
     const UsuarioID = await executeTransaction(async (conn) => {
-      // Verificar duplicados
       const [existEmail] = await conn.query('SELECT UsuarioID FROM usuarios WHERE Email = ?', [Email]);
       if (existEmail.length) throw new Error('El email ya está registrado');
 
       const [existUser] = await conn.query('SELECT UsuarioID FROM usuarios WHERE Username = ?', [Username]);
       if (existUser.length) throw new Error('El username ya está en uso');
 
-      // Verificar que el rol existe
       const [rol] = await conn.query('SELECT RolID FROM roles WHERE RolID = ?', [RolID]);
       if (!rol.length) throw new Error('El rol seleccionado no existe');
 
       const PasswordHash = await bcrypt.hash(Password, 10);
-
       const [result] = await conn.query(`
         INSERT INTO usuarios (NombreCompleto, Email, Username, PasswordHash, RolID, Activo)
         VALUES (?, ?, ?, ?, ?, 1)
@@ -109,12 +90,12 @@ exports.createUser = async (req, res) => {
     res.status(201).json({ success: true, message: 'Usuario creado correctamente', UsuarioID });
   } catch (error) {
     console.error('❌ Error creando usuario:', error);
-    const status = ['El email ya está registrado', 'El username ya está en uso', 'El rol seleccionado no existe'].includes(error.message) ? 400 : 500;
-    res.status(status).json({ success: false, message: error.message });
+    const known = ['El email ya está registrado', 'El username ya está en uso', 'El rol seleccionado no existe'];
+    res.status(known.includes(error.message) ? 400 : 500).json({ success: false, message: error.message });
   }
 };
 
-// ─── 4. Actualizar usuario ────────────────────────────────────────────────────
+// ─── 4. Actualizar usuario ────────────────────────────────────
 exports.updateUser = async (req, res) => {
   try {
     const { id } = req.params;
@@ -127,17 +108,14 @@ exports.updateUser = async (req, res) => {
     console.log(`📝 Actualizando usuario ID: ${id}`);
 
     await executeTransaction(async (conn) => {
-      // Verificar que existe
       const [exist] = await conn.query('SELECT UsuarioID FROM usuarios WHERE UsuarioID = ?', [id]);
       if (!exist.length) throw new Error('Usuario no encontrado');
 
-      // Verificar email único (excluyendo el propio)
       const [emailExist] = await conn.query(
         'SELECT UsuarioID FROM usuarios WHERE Email = ? AND UsuarioID != ?', [Email, id]
       );
       if (emailExist.length) throw new Error('El email ya está registrado por otro usuario');
 
-      // Verificar rol
       const [rol] = await conn.query('SELECT RolID FROM roles WHERE RolID = ?', [RolID]);
       if (!rol.length) throw new Error('El rol seleccionado no existe');
 
@@ -151,24 +129,27 @@ exports.updateUser = async (req, res) => {
     res.json({ success: true, message: 'Usuario actualizado correctamente' });
   } catch (error) {
     console.error('❌ Error actualizando usuario:', error);
-    const status = ['Usuario no encontrado', 'El email ya está registrado por otro usuario', 'El rol seleccionado no existe'].includes(error.message) ? 400 : 500;
-    res.status(status).json({ success: false, message: error.message });
+    const known = ['Usuario no encontrado', 'El email ya está registrado por otro usuario', 'El rol seleccionado no existe'];
+    res.status(known.includes(error.message) ? 400 : 500).json({ success: false, message: error.message });
   }
 };
 
-// ─── 5. Activar / Desactivar usuario ─────────────────────────────────────────
+// ─── 5. Activar / Desactivar usuario ─────────────────────────
 exports.toggleUserStatus = async (req, res) => {
   try {
     const { id } = req.params;
     const requestingUserId = req.user.usuarioId;
 
-    // Un admin no puede desactivarse a sí mismo
     if (parseInt(id) === requestingUserId) {
       return res.status(400).json({ success: false, message: 'No puedes desactivar tu propia cuenta' });
     }
 
-    const users = await executeQuery('SELECT UsuarioID, Activo, NombreCompleto FROM usuarios WHERE UsuarioID = ?', [id]);
-    if (!users.length) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    const [users] = await executeQuery(
+      'SELECT UsuarioID, Activo, NombreCompleto FROM usuarios WHERE UsuarioID = ?', [id]
+    );
+    if (!users || users.length === 0) {
+      return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    }
 
     const nuevoEstado = users[0].Activo ? 0 : 1;
     await executeQuery('UPDATE usuarios SET Activo = ? WHERE UsuarioID = ?', [nuevoEstado, id]);
@@ -182,26 +163,27 @@ exports.toggleUserStatus = async (req, res) => {
   }
 };
 
-// ─── 6. Cambiar contraseña (el propio usuario) ───────────────────────────────
+// ─── 6. Cambiar contraseña ────────────────────────────────────
 exports.changePassword = async (req, res) => {
   try {
     const { id } = req.params;
     const { PasswordActual, PasswordNueva } = req.body;
     const requestingUserId = req.user.usuarioId;
 
-    // Solo puede cambiar su propia contraseña (o admin cambia la de cualquiera)
     if (parseInt(id) !== requestingUserId && req.user.rol !== 'Administrador') {
       return res.status(403).json({ success: false, message: 'No tienes permiso para cambiar esta contraseña' });
     }
-
     if (!PasswordNueva || PasswordNueva.length < 6) {
       return res.status(400).json({ success: false, message: 'La nueva contraseña debe tener al menos 6 caracteres' });
     }
 
-    const users = await executeQuery('SELECT PasswordHash FROM usuarios WHERE UsuarioID = ?', [id]);
-    if (!users.length) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    const [users] = await executeQuery(
+      'SELECT PasswordHash FROM usuarios WHERE UsuarioID = ?', [id]
+    );
+    if (!users || users.length === 0) {
+      return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    }
 
-    // Si no es admin, verificar contraseña actual
     if (parseInt(id) === requestingUserId) {
       if (!PasswordActual) {
         return res.status(400).json({ success: false, message: 'La contraseña actual es requerida' });
@@ -223,7 +205,7 @@ exports.changePassword = async (req, res) => {
   }
 };
 
-// ─── 7. Resetear contraseña (solo admin) ─────────────────────────────────────
+// ─── 7. Resetear contraseña (solo admin) ─────────────────────
 exports.resetPassword = async (req, res) => {
   try {
     const { id } = req.params;
@@ -233,8 +215,12 @@ exports.resetPassword = async (req, res) => {
       return res.status(400).json({ success: false, message: 'La nueva contraseña debe tener al menos 6 caracteres' });
     }
 
-    const users = await executeQuery('SELECT UsuarioID, NombreCompleto FROM usuarios WHERE UsuarioID = ?', [id]);
-    if (!users.length) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    const [users] = await executeQuery(
+      'SELECT UsuarioID, NombreCompleto FROM usuarios WHERE UsuarioID = ?', [id]
+    );
+    if (!users || users.length === 0) {
+      return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    }
 
     const PasswordHash = await bcrypt.hash(PasswordNueva, 10);
     await executeQuery('UPDATE usuarios SET PasswordHash = ? WHERE UsuarioID = ?', [PasswordHash, id]);
@@ -247,10 +233,12 @@ exports.resetPassword = async (req, res) => {
   }
 };
 
-// ─── 8. Listar roles disponibles ─────────────────────────────────────────────
+// ─── 8. Listar roles ──────────────────────────────────────────
 exports.getRoles = async (req, res) => {
   try {
-    const roles = await executeQuery('SELECT RolID, NombreRol, Descripcion, Permisos FROM roles ORDER BY RolID');
+    const [roles] = await executeQuery(
+      'SELECT RolID, NombreRol, Descripcion, Permisos FROM roles ORDER BY RolID'
+    );
     res.json({ success: true, data: roles });
   } catch (error) {
     console.error('❌ Error obteniendo roles:', error);
